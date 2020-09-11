@@ -6,54 +6,76 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/Jac0bDeal/pikamon/internal/pikamon/cache"
 	"github.com/Jac0bDeal/pikamon/internal/pikamon/commands"
+	"github.com/Jac0bDeal/pikamon/internal/pikamon/config"
 	"github.com/Jac0bDeal/pikamon/internal/pikamon/spawn"
+	"github.com/Jac0bDeal/pikamon/internal/pikamon/store"
+
 	"github.com/bwmarrin/discordgo"
-	"github.com/dgraph-io/ristretto"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
 // Bot listens to Discord and performs the various actions of Pikamon.
 type Bot struct {
+	cache   *cache.Cache
+	store   store.Store
 	discord *discordgo.Session
 }
 
 // New configures a Bot from the passed config, and returns it.
-func New(cfg *Config) (*Bot, error) {
+func New(cfg *config.Config) (*Bot, error) {
+	log.Info("Creating Discord session...")
 	authStr := fmt.Sprintf("Bot %s", cfg.Discord.Token)
 	discord, err := discordgo.New(authStr)
 	if err != nil {
 		return nil, err
 	}
+	log.Info("Discord session created.")
 
-	// Create bot cache
-	botCache := newBotCache(cfg)
+	log.Info("Creating bot cache...")
+	botCache, err := cache.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("Bot cache created.")
 
-	// register discord handlers
-	commandsHandler := commands.NewHandler(botCache.ChannelCache)
+	log.Info("Creating bot store...")
+	botStore, err := store.New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("Bot store created.")
 
-	spawnHandler, err := spawn.NewHandler(
-		botCache.ChannelCache,
+	log.Info("Registering bot handlers...")
+	log.Debug("Registering commands handler...")
+	commandsHandler := commands.NewHandler(
+		botCache,
+		botStore,
+	)
+	discord.AddHandler(commandsHandler.Handle)
+	log.Debug("Commands handler registered.")
+	log.Debug("Registering spawn handler...")
+	spawnHandler := spawn.NewHandler(
+		botCache,
+		botStore,
 		cfg.Bot.SpawnChance,
 		cfg.Bot.MaximumSpawnDuration,
 		cfg.Bot.MaxPokemonID,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	discord.AddHandler(commandsHandler.Handle)
 	discord.AddHandler(spawnHandler.Handle)
+	log.Debug("Spawn handler registered.")
 
 	return &Bot{
+		cache:   botCache,
 		discord: discord,
+		store:   botStore,
 	}, nil
 }
 
 // Run starts the bot, listens for a halt signal, and shuts down when the halt is received.
 func (b *Bot) Run() error {
-	log.Info("Starting bot...")
 	if err := b.Start(); err != nil {
 		return errors.Wrap(err, "failed to start bot")
 	}
@@ -64,43 +86,39 @@ func (b *Bot) Run() error {
 	<-sc
 
 	log.Info("Received stop signal, shutting down...")
-	if err := b.Stop(); err != nil {
-		return errors.Wrap(err, "failed to stop bot gracefully")
-	}
+	b.Stop()
 	return nil
 }
 
 // Start opens the connection to the discord web socket.
 func (b *Bot) Start() error {
+	log.Info("Starting bot...")
+	if err := b.store.Open(); err != nil {
+		return errors.Wrap(err, "failed to open pikamon store")
+	}
+
+	log.Info("Opening connection to Discord...")
 	if err := b.discord.Open(); err != nil {
 		return errors.Wrap(err, "failed to open web socket connection to Discord")
 	}
+	log.Info("Connection to Discord established.")
 	return nil
 }
 
 // Stop gracefully shuts down the bot.
-func (b *Bot) Stop() error {
-	return b.discord.Close()
-}
-
-// Create a cache object for the Bot. May contain different caches of varying sizes (used for different purposes)
-type BotCache struct {
-	ChannelCache *ristretto.Cache
-}
-
-// Initialize bot cache object
-func newBotCache(cfg *Config) *BotCache {
-	// Create our bot cache for channels
-	channelCache, err := ristretto.NewCache(&ristretto.Config{
-		NumCounters: cfg.ChannelCache.NumCounters,
-		MaxCost:     cfg.ChannelCache.MaxCost,
-		BufferItems: cfg.ChannelCache.BufferItems,
-	})
+func (b *Bot) Stop() {
+	log.Info("Stopping bot...")
+	log.Info("Closing connection to Discord...")
+	err := b.discord.Close()
 	if err != nil {
-		log.Fatal(err, "failed to create channel cache")
+		log.Error("Error closing discord api session: %v", err)
 	}
+	log.Info("Connection to Discord closed...")
 
-	return &BotCache{
-		ChannelCache: channelCache,
+	b.cache.Close()
+
+	err = b.store.Close()
+	if err != nil {
+		log.Error("Error closing store session: %v", err)
 	}
 }

@@ -4,8 +4,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Jac0bDeal/pikamon/internal/pikamon/cache"
+	"github.com/Jac0bDeal/pikamon/internal/pikamon/store"
 	"github.com/bwmarrin/discordgo"
-	"github.com/dgraph-io/ristretto"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -13,21 +14,25 @@ import (
 const (
 	CommandKeyword = "p!ka"
 
-	catchCommand = "catch"
-	helpCommand  = "help"
+	catchCommand    = "catch"
+	listCommand     = "list"
+	registerCommand = "register"
+	helpCommand     = "help"
 )
 
 type handler func(*discordgo.Session, *discordgo.MessageCreate)
 
 type Handler struct {
-	channelCache *ristretto.Cache
-	catchMtx     *sync.Mutex
+	cache    *cache.Cache
+	store    store.Store
+	catchMtx *sync.Mutex
 }
 
-func NewHandler(channelCache *ristretto.Cache) *Handler {
+func NewHandler(c *cache.Cache, s store.Store) *Handler {
 	return &Handler{
-		channelCache: channelCache,
-		catchMtx:     &sync.Mutex{},
+		cache:    c,
+		store:    s,
+		catchMtx: &sync.Mutex{},
 	}
 }
 
@@ -64,8 +69,12 @@ func (h *Handler) Handle(s *discordgo.Session, m *discordgo.MessageCreate) {
 	switch command {
 	case catchCommand:
 		handle = h.catch
+	case listCommand:
+		handle = h.list
 	case helpCommand:
 		handle = h.help
+	case registerCommand:
+		handle = h.register
 	default:
 		log.Debugf("Received unrecognized command: %s", commandText)
 		handle = h.help
